@@ -1,5 +1,5 @@
 #!/bin/bash
-# genzee — btrfs generation manager for Haliade OS (Limine boot entries)
+# chronos — btrfs generation manager for Haliade OS (Limine boot entries)
 set -euo pipefail
 
 # help can run unprivileged; everything else needs root
@@ -14,8 +14,8 @@ case "${1:-help}" in
 esac
 
 
-SNAP_MOUNT="${GENZEE_SNAP_MOUNT:-/.snapshots}"
-LIMINE_CONF="${GENZEE_LIMINE:-/boot/limine.conf}"
+SNAP_MOUNT="${CHRONOS_SNAP_MOUNT:-/.snapshots}"
+LIMINE_CONF="${CHRONOS_LIMINE:-/boot/limine.conf}"
 LIVE_SUBVOL="@"
 SNAPS_SUBVOL="@snapshots"
 NEXT_SUBVOL="@.next"
@@ -135,7 +135,7 @@ mount_toplevel() {
     local dev tmp
     dev=$(root_device)
     [ -n "$dev" ] || die "could not detect root device (is / on btrfs?)"
-    tmp=$(mktemp -d /tmp/genzee-tl.XXXXXX)
+    tmp=$(mktemp -d /tmp/chronos-tl.XXXXXX)
     if ! mount -t btrfs -o subvol=/ "$dev" "$tmp" 2>/dev/null; then
         rmdir "$tmp" 2>/dev/null || true
         die "failed to mount btrfs top-level on $dev"
@@ -321,8 +321,8 @@ rewrite_limine() {
     local tmp name num
     tmp=$(mktemp)
     {
-        echo "# Limine configuration for Haliade OS — managed by genzee"
-        echo "# Do not hand-edit generation entries; run: genzee rewrite-limine"
+        echo "# Limine configuration for Haliade OS — managed by chronos"
+        echo "# Do not hand-edit generation entries; run: chronos rewrite-limine"
         echo
         echo "timeout: $timeout"
         echo "serial: $serial"
@@ -376,7 +376,7 @@ rewrite_limine() {
 
 cmd_create() {
     local desc="${1:-}"
-    [ -n "$desc" ] || die "missing description (usage: genzee create <description>)"
+    [ -n "$desc" ] || die "missing description (usage: chronos create <description>)"
 
     # If we previously rolled back to @.next and are now running on it, adopt first
     cmd_adopt_if_needed
@@ -515,7 +515,7 @@ cmd_adopt_if_needed() {
     # Still running on @.next until reboot; point default boot back at @
     rewrite_limine "$LIVE_SUBVOL"
     ok "promoted rollback to $LIVE_SUBVOL — reboot once more to drop $NEXT_SUBVOL"
-    info "after reboot you may run: genzee cleanup-next"
+    info "after reboot you may run: chronos cleanup-next"
 }
 
 cmd_cleanup_next() {
@@ -541,7 +541,7 @@ cmd_cleanup_next() {
 
 cmd_rollback() {
     local raw="${1:-}"
-    [ -n "$raw" ] || die "missing generation id (usage: genzee rollback <N>)"
+    [ -n "$raw" ] || die "missing generation id (usage: chronos rollback <N>)"
 
     ensure_snapshots_mounted
     local id
@@ -587,12 +587,12 @@ cmd_rollback() {
     set_current "$id"
     rewrite_limine "$NEXT_SUBVOL"
     ok "rollback staged: next boot uses $NEXT_SUBVOL (from $id)"
-    info "reboot now. After boot, run: genzee create \"after rollback\"  # adopts @.next -> @"
+    info "reboot now. After boot, run: chronos create \"after rollback\"  # adopts @.next -> @"
 }
 
 cmd_remove() {
     local raw="${1:-}"
-    [ -n "$raw" ] || die "missing generation id (usage: genzee remove <N>)"
+    [ -n "$raw" ] || die "missing generation id (usage: chronos remove <N>)"
 
     ensure_snapshots_mounted
     local id current booted
@@ -623,9 +623,9 @@ cmd_remove() {
 
 cmd_help() {
     cat <<EOF
-genzee — btrfs generation manager for Haliade OS
+chronos — btrfs generation manager for Haliade OS
 
-Usage: genzee <command> [args]
+Usage: chronos <command> [args]
 
 Commands:
   create <description>   Snapshot live root as a new read-only generation
