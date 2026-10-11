@@ -19,12 +19,16 @@ LIMINE_CONF="${CHRONOS_LIMINE:-/boot/limine.conf}"
 LIVE_SUBVOL="@"
 SNAPS_SUBVOL="@snapshots"
 NEXT_SUBVOL="@.next"
+# init identity db, shared with iniswap and the shutdown/reboot wrappers
+# (overridable for tests)
+INIT_DB="${CHRONOS_INIT_DB:-/var/db/init}"
 
 # Helpers
 
 die() { echo "error: $*" >&2; exit 1; }
 info() { echo "[info] $*"; }
 ok() { echo "[ok] $*"; }
+warn() { echo "warning: $*" >&2; }
 
 root_device() {
     findmnt -n -o SOURCE / 2>/dev/null | sed 's/\[.*\]//' | head -1
@@ -109,9 +113,20 @@ find_initrd() {
         done
     fi
 
-    # Collect all initramfs candidates
+    # The current image name wins over anything else in /boot: a reinstall
+    # target can still carry the pre-rename initramfs-installed.img, and the
+    # version sort below ranks "installed" above "core", which would keep boot
+    # entries pointing at the stale file forever.
+    if [ -f /boot/initramfs-core.img ]; then
+        basename /boot/initramfs-core.img
+        return 0
+    fi
+
+    # Collect all initramfs candidates, skipping the pre-rename legacy name
+    # (kept only as a last resort below, so an uncleaned target still boots).
     for i in /boot/initramfs-*.img; do
         [ -f "$i" ] || continue
+        [ "$i" = "/boot/initramfs-installed.img" ] && continue
         candidates+=("$i")
     done
     if [ ${#candidates[@]} -gt 0 ]; then
@@ -122,13 +137,57 @@ find_initrd() {
         return 0
     fi
 
-    # Fallback to generic names
+    # Fallback to generic names; initramfs-installed.img is the pre-rename
+    # image, accepted here only when nothing else exists so old targets still
+    # boot until the installer has cleaned them up.
     for i in /boot/initramfs-installed.img /boot/initrd.img* /boot/initrd-*; do
         [ -f "$i" ] || continue
         basename "$i"
         return 0
     done
     return 1
+}
+
+# Newest kernel version with modules at the given root path, or "". Kernel
+# versions are the directories in lib/modules (e.g. 6.18.10-gen); anything
+# not starting with a digit (build/, source/, extramodules-*) is not a
+# kernel we can boot.
+modules_kernel() {
+    ls -1 "$1/lib/modules/" 2>/dev/null | sed -n '/^[0-9]/p' | sort -V | tail -1 || true
+}
+
+# Kernel a generation boots with. A generation snapshot is read-only, so the
+# newest module dir inside it is the kernel that generation ran when it was
+# captured — and the only one it can boot with drivers. Newer generations
+# record it in meta.toml at create time; legacy ones fall back to the scan
+# above. Returns the vmlinuz basename, or nothing.
+generation_kernel() {
+    local gen="$1" ver
+    ver=$(load_meta_kernel "$gen")
+    if [ -z "$ver" ]; then
+        ver=$(modules_kernel "$SNAP_MOUNT/$gen")
+    fi
+    [ -n "$ver" ] || return 1
+    [ -f "/boot/vmlinuz-$ver" ] || return 1
+    echo "vmlinuz-$ver"
+}
+
+# Kernel for the default /Haliade OS entry: the newest kernel that the
+# entry's target subvolume actually has modules for. After a kernel upgrade
+# that is the new kernel (live @ was just upgraded), but when a rollback is
+# staged it is the rolled-back kernel (@.next) — so a rollback never boots a
+# kernel whose modules are missing from the subvolume it boots. Falls back
+# to the newest kernel in /boot.
+default_kernel() {
+    local subvol="$1" tl ver=""
+    tl=$(mount_toplevel 2>/dev/null) || true
+    if [ -n "$tl" ]; then
+        ver=$(modules_kernel "$tl/$subvol")
+        umount "$tl" 2>/dev/null || true
+        rmdir "$tl" 2>/dev/null || true
+    fi
+    [ -n "$ver" ] && [ -f "/boot/vmlinuz-$ver" ] && { echo "vmlinuz-$ver"; return 0; }
+    find_kernel || true
 }
 
 mount_toplevel() {
@@ -194,7 +253,7 @@ next_id() {
 }
 
 write_meta_file() {
-    local path="$1" id="$2" desc="$3" cmdline="$4" ts
+    local path="$1" id="$2" desc="$3" cmdline="$4" kernel="$5" ts
     ts=$(date +%s)
     # escape quotes in description and cmdline
     desc=${desc//\"/\\\"}
@@ -204,6 +263,7 @@ id = "$id"
 timestamp = $ts
 description = "$desc"
 cmdline = "$cmdline"
+kernel = "$kernel"
 EOF
 }
 
@@ -237,6 +297,24 @@ load_meta_cmdline() {
     sed -n 's/^cmdline = "\(.*\)"/\1/p' "$f" | head -1
 }
 
+load_meta_kernel() {
+    local f
+    f=$(meta_path "$1")
+    [ -f "$f" ] || return 0
+    sed -n 's/^kernel = "\(.*\)"/\1/p' "$f" | head -1
+}
+
+# Recorded cmdline for a generation; empty for legacy generations without
+# one. Also heals older metas that stored the entry's indentation and a
+# duplicated "cmdline:" key (they were emitted as "cmdline:     cmdline:").
+gen_cmdline() {
+    local c
+    c=$(load_meta_cmdline "$1")
+    printf '%s' "$c" \
+        | sed -e 's/^[[:space:]]*//' -e 's/^cmdline:[[:space:]]*//' \
+              -e 's/^[[:space:]]*//' -e 's/^cmdline:[[:space:]]*//'
+}
+
 read_current() {
     if [ -f "$SNAP_MOUNT/.current" ]; then
         tr -d '[:space:]' < "$SNAP_MOUNT/.current"
@@ -247,19 +325,74 @@ set_current() {
     printf '%s\n' "$1" > "$SNAP_MOUNT/.current"
 }
 
-cmdline_extras() {
-    local conf="$LIMINE_CONF" line extras="" tok
-    [ -f "$conf" ] || { echo ""; return 0; }
-    line=$(grep -m1 '^[[:space:]]*cmdline:' "$conf" 2>/dev/null || true)
-    line=${line#*cmdline:}
-    line=$(echo "$line" | sed 's/^[[:space:]]*//')
+# Extras = cmdline tokens except root/rootflags/rw/ro (and stray keys).
+extras_from() {
+    local line="$1" extras="" tok
     for tok in $line; do
         case "$tok" in
             root=*|rootflags=*|rw|ro) ;;
+            # stray duplicated key from a bad capture — never an extra
+            cmdline:*) ;;
             *) extras="${extras:+$extras }$tok" ;;
         esac
     done
     echo "$extras"
+}
+
+cmdline_extras() {
+    local conf="$LIMINE_CONF" line
+    [ -f "$conf" ] || { echo ""; return 0; }
+    line=$(grep -m1 '^[[:space:]]*cmdline:' "$conf" 2>/dev/null || true)
+    line=${line#*cmdline:}
+    line=$(echo "$line" | sed 's/^[[:space:]]*//')
+    extras_from "$line"
+}
+
+# extras with any init= token removed — used for legacy generations that
+# have no recorded cmdline: they must boot the default init, not whichever
+# one happens to be active now.
+strip_init() {
+    local out="" tok
+    for tok in $1; do
+        case "$tok" in
+            init=*) ;;
+            *) out="${out:+$out }$tok" ;;
+        esac
+    done
+    echo "$out"
+}
+
+# Init name declared by a cmdline string ("openrc" when there is no init=
+# at all, since that is the Haliade default). Anchored to whitespace so
+# params like "reinit=5" don't false-match.
+init_name_of() {
+    local p
+    p=$(printf ' %s' "$1" | sed -n 's/.*[[:space:]]init=\([^ ]*\).*/\1/p')
+    case "$p" in
+        */runit-init|*/runit) echo "runit" ;;
+        */dinit)             echo "dinit" ;;
+        */openrc-init)       echo "openrc" ;;
+        "")                  echo "openrc" ;;
+        *)                   echo "unknown" ;;
+    esac
+}
+
+# Align /var/db/init with the init a rollback will boot (same ordering as
+# iniswap's record_init_state: current <- new, previous <- old current), so
+# the universal shutdown/reboot wrappers pick the right tool right after
+# the rollback boot — without waiting for the next declaration sync.
+update_init_db() {
+    local new_init old=""
+    new_init=$(init_name_of "$1")
+    [ "$new_init" != "unknown" ] || return 0
+    mkdir -p "$INIT_DB"
+    if [ -s "$INIT_DB/current" ]; then
+        old=$(tr -d '[:space:]' < "$INIT_DB/current")
+        if [ -n "$old" ] && [ "$old" != "$new_init" ]; then
+            printf '%s\n' "$old" > "$INIT_DB/previous"
+        fi
+    fi
+    printf '%s\n' "$new_init" > "$INIT_DB/current"
 }
 
 limine_global() {
@@ -297,6 +430,7 @@ default_live_subvol() {
 
 rewrite_limine() {
     local live_subvol="${1:-}"
+    local extras_override="${2:-}"
     ensure_snapshots_mounted
 
     if [ -z "$live_subvol" ]; then
@@ -308,8 +442,27 @@ rewrite_limine() {
     # Extract version from kernel filename (vmlinuz-X.Y.Z-gen -> X.Y.Z-gen)
     kernel_ver="${kernel#vmlinuz-}"
     initrd=$(find_initrd "$kernel_ver") || die "no initramfs found in /boot"
+
+    # Pin the DEFAULT entry to the kernel the booted subvolume has modules
+    # for. That is normally the newest kernel (live @ is upgraded by
+    # genkernel), but after a staged rollback it is the rolled-back kernel
+    # (@.next) — otherwise the rollback would boot a kernel whose modules
+    # are not in that subvolume: no drivers, no network.
+    local live_kernel live_initrd live_ver
+    live_kernel=$(default_kernel "$live_subvol") || true
+    [ -n "$live_kernel" ] || live_kernel="$kernel"
+    live_ver="${live_kernel#vmlinuz-}"
+    live_initrd=$(find_initrd "$live_ver") || live_initrd="$initrd"
     rspec=$(root_spec)
-    extras=$(cmdline_extras)
+    # $2 overrides the extras (including init=) used for the LIVE entry:
+    # cmd_rollback passes the target generation's recorded extras so a
+    # rollback also rolls the boot entry's init= back to what that
+    # generation recorded. Default: keep the current main entry's extras.
+    if [ -n "$extras_override" ]; then
+        extras="$extras_override"
+    else
+        extras=$(cmdline_extras)
+    fi
     timeout=$(limine_global "timeout" "15")
     serial=$(limine_global "serial" "yes")
     wallpaper=$(limine_global "wallpaper" "")
@@ -317,6 +470,17 @@ rewrite_limine() {
     local live_cmd gen_cmd
     live_cmd="root=${rspec} rootflags=subvol=${live_subvol} rw"
     [ -n "$extras" ] && live_cmd="$live_cmd $extras"
+
+    # extras minus init=: only the live entry declares the active init.
+    # Legacy generations without a stored cmdline must fall back to the
+    # default init instead of inheriting whichever one is active now.
+    local extras_no_init="" tok
+    for tok in $extras; do
+        case "$tok" in
+            init=*) ;;
+            *) extras_no_init="${extras_no_init:+$extras_no_init }$tok" ;;
+        esac
+    done
 
     local tmp name num
     tmp=$(mktemp)
@@ -333,8 +497,8 @@ rewrite_limine() {
         echo
         echo "/Haliade OS"
         echo "    protocol: linux"
-        echo "    kernel_path: boot():/${kernel}"
-        echo "    module_path: boot():/${initrd}"
+        echo "    kernel_path: boot():/${live_kernel}"
+        echo "    module_path: boot():/${live_initrd}"
         echo "    cmdline: $live_cmd"
         echo
 
@@ -352,16 +516,33 @@ rewrite_limine() {
             echo "/Generations"
             for name in "${gens[@]}"; do
                 num=${name#gen-}
-                gen_cmd=$(load_meta_cmdline "$name")
-                # Fallback for legacy gens without stored cmdline
-                [ -z "$gen_cmd" ] && gen_cmd="root=${rspec} rootflags=subvol=${SNAPS_SUBVOL}/${name} rw ${extras}"
+                gen_cmd=$(gen_cmdline "$name")
+                # Fallback for legacy gens without stored cmdline: no init=,
+                # so they boot the default init (never the currently-active one)
+                [ -z "$gen_cmd" ] && gen_cmd="root=${rspec} rootflags=subvol=${SNAPS_SUBVOL}/${name} rw${extras_no_init:+ $extras_no_init}"
                 local desc
+
+                # Pin this generation to the kernel ITS snapshot has modules
+                # for. Rewriting every entry with the newest kernel would make
+                # a rollback boot a kernel whose module dir is not in the
+                # generation — no drivers, no network.
+                local gen_kernel gen_initrd gen_ver
+                gen_kernel=$(generation_kernel "$name") || true
+                if [ -n "$gen_kernel" ]; then
+                    gen_ver="${gen_kernel#vmlinuz-}"
+                    gen_initrd=$(find_initrd "$gen_ver") || gen_initrd="$initrd"
+                else
+                    warn "generation $name: no kernel with modules found — using newest kernel ($kernel)"
+                    gen_kernel="$kernel"
+                    gen_initrd="$initrd"
+                fi
+
                 desc=$(load_meta_desc "$name")
                 desc=${desc:-"(no description)"}
                 echo "    //Generation ${num} — ${desc}"
                 echo "        protocol: linux"
-                echo "        kernel_path: boot():/${kernel}"
-                echo "        module_path: boot():/${initrd}"
+                echo "        kernel_path: boot():/${gen_kernel}"
+                echo "        module_path: boot():/${gen_initrd}"
                 echo "        cmdline: $gen_cmd"
             done
         fi
@@ -398,9 +579,15 @@ cmd_create() {
 
     info "creating generation $id from $source_subvol ($desc)..."
 
-    # Capture the full current cmdline from limine.conf
+    # Capture the full current cmdline from limine.conf (first cmdline line =
+    # the default /Haliade OS entry). Strip the entry indentation AND any
+    # stray "cmdline:" key prefix: the line looks like "    cmdline: root=...",
+    # and a capture that keeps the indent poisons every rewrite afterwards.
     local cur_cmdline
-    cur_cmdline=$(grep -m1 '^[[:space:]]*cmdline:' "$LIMINE_CONF" 2>/dev/null | sed 's/^cmdline:[[:space:]]*//' || true)
+    cur_cmdline=$(grep -m1 '^[[:space:]]*cmdline:' "$LIMINE_CONF" 2>/dev/null \
+        | sed -e 's/^[[:space:]]*cmdline:[[:space:]]*//' \
+              -e 's/^[[:space:]]*//' \
+              -e 's/^cmdline:[[:space:]]*//' || true)
 
     tl=$(mount_toplevel)
     if [ ! -d "$tl/$source_subvol" ]; then
@@ -414,8 +601,12 @@ cmd_create() {
     umount "$tl"
     rmdir "$tl" 2>/dev/null || true
 
-    # RO snapshot: store metadata beside the snap
-    write_meta_file "$SNAP_MOUNT/${id}.meta.toml" "$id" "$desc" "$cur_cmdline"
+    # RO snapshot: store metadata beside the snap. Record the kernel the
+    # snapshot boots with (its newest module dir) so limine.conf rewrites
+    # pin this generation to its own kernel rather than the newest one.
+    local kernel_ver
+    kernel_ver=$(modules_kernel /) || true
+    write_meta_file "$SNAP_MOUNT/${id}.meta.toml" "$id" "$desc" "$cur_cmdline" "$kernel_ver"
 
     set_current "$id"
     rewrite_limine
@@ -544,8 +735,20 @@ cmd_rollback() {
     [ -n "$raw" ] || die "missing generation id (usage: chronos rollback <N>)"
 
     ensure_snapshots_mounted
-    local id
+    local id gen_cmd extras_override
     id=$(resolve_id "$raw")
+
+    # The rolled-back boot must use the init THAT generation recorded: the
+    # snapshot's filesystem only has that init installed, so keeping the
+    # current init= leaves the machine unbootable (e.g. rolling back to a
+    # pre-dinit generation while init=/sbin/dinit). A legacy generation
+    # without a recorded cmdline falls back to the default init (no init=).
+    gen_cmd=$(gen_cmdline "$id")
+    if [ -n "$gen_cmd" ]; then
+        extras_override=$(extras_from "$gen_cmd")
+    else
+        extras_override=$(strip_init "$(cmdline_extras)")
+    fi
 
     local booted tl
     booted=$(current_subvol)
@@ -566,7 +769,8 @@ cmd_rollback() {
             umount "$tl"
             rmdir "$tl" 2>/dev/null || true
             set_current "$id"
-            rewrite_limine "$LIVE_SUBVOL"
+            rewrite_limine "$LIVE_SUBVOL" "$extras_override"
+            update_init_db "$extras_override"
             ok "rolled back to $id — reboot into Haliade OS to activate"
             return 0
             ;;
@@ -585,7 +789,8 @@ cmd_rollback() {
     rmdir "$tl" 2>/dev/null || true
 
     set_current "$id"
-    rewrite_limine "$NEXT_SUBVOL"
+    rewrite_limine "$NEXT_SUBVOL" "$extras_override"
+    update_init_db "$extras_override"
     ok "rollback staged: next boot uses $NEXT_SUBVOL (from $id)"
     info "reboot now. After boot, run: chronos create \"after rollback\"  # adopts @.next -> @"
 }
@@ -645,6 +850,11 @@ Layout:
 Limine menu:
   /Haliade OS                              boots live (@ or @.next)
   /Generations//Haliade OS (Generation N)  boots @snapshots/gen-N
+
+Kernels:
+  Each entry boots the kernel its subvolume has modules for. Generations
+  keep the kernel they were captured with; the default entry follows the
+  subvolume it boots (a staged @.next rollback keeps its own kernel too).
 EOF
 }
 
