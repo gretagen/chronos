@@ -2,13 +2,15 @@
 # chronos — btrfs generation manager for Haliade OS (Limine boot entries)
 set -euo pipefail
 
-# help can run unprivileged; everything else needs root
+# Only operations that change generations or the boot configuration need
+# superuser privileges. Everything else runs as any user: the read-only
+# commands (list, current, help) and any invocation chronos itself rejects
+# with a usage error.
 case "${1:-help}" in
-    help|-h|--help) ;;
-    *)
+    create|rollback|remove|rewrite-limine|rewrite_limine|cleanup-next|cleanup_next)
         if [ "${EUID:-$(id -u)}" -ne 0 ]; then
-            echo "Managing generations requires superuser privileges."
-            exit
+            echo "Managing generations requires superuser privileges." >&2
+            exit 1
         fi
         ;;
 esac
@@ -229,6 +231,17 @@ ensure_snapshots_mounted() {
     dev=$(root_device)
     mount -t btrfs -o "subvol=$SNAPS_SUBVOL" "$dev" "$SNAP_MOUNT" \
         || die "failed to mount $SNAPS_SUBVOL on $SNAP_MOUNT"
+}
+
+# The reporting commands (list, current) run without superuser privileges, so
+# they must never mount or create anything: a normal user reads whatever is
+# already on $SNAP_MOUNT, while root can still fall back to the setup above.
+mount_for_reading() {
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        [ -d "$SNAP_MOUNT" ] || return 1
+        return 0
+    fi
+    ensure_snapshots_mounted
 }
 
 resolve_id() {
@@ -614,7 +627,7 @@ cmd_create() {
 }
 
 cmd_list() {
-    ensure_snapshots_mounted 2>/dev/null || {
+    mount_for_reading 2>/dev/null || {
         info "no generations found"
         return 0
     }
@@ -658,7 +671,7 @@ cmd_list() {
 }
 
 cmd_current() {
-    ensure_snapshots_mounted 2>/dev/null || true
+    mount_for_reading 2>/dev/null || true
     local id desc ts sub
     id=$(read_current 2>/dev/null || true)
     sub=$(current_subvol)
@@ -676,6 +689,9 @@ cmd_current() {
     [ -n "$ts" ] && echo "date:    $ts"
     [ -n "$desc" ] && echo "desc:    $desc"
     [ -n "$sub" ] && echo "booted:  $sub"
+    # Informational only: the exit status must not depend on which fields
+    # happened to be known (an empty booted subvolume made this exit 1).
+    return 0
 }
 
 # If booted from @.next after a deferred rollback, promote it to @.
@@ -841,6 +857,9 @@ Commands:
   rewrite-limine         Regenerate /boot/limine.conf
   cleanup-next           Delete staged @.next after a completed rollback
   help                   Show this help
+
+Only create/rollback/remove/rewrite-limine/cleanup-next need superuser
+privileges; list, current and help can be run by any user.
 
 Layout:
   @                    live writable root
