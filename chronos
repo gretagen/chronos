@@ -385,6 +385,7 @@ init_name_of() {
         */runit-init|*/runit) echo "runit" ;;
         */dinit)             echo "dinit" ;;
         */openrc-init)       echo "openrc" ;;
+        */systemd)            echo "systemd" ;;
         "")                  echo "openrc" ;;
         *)                   echo "unknown" ;;
     esac
