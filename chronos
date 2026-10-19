@@ -499,7 +499,7 @@ rewrite_limine() {
     local tmp name num
     tmp=$(mktemp)
     {
-        echo "# Limine configuration for this Haliade system,  managed by chronos"
+        echo "# Limine configuration for this Haliade system, managed by chronos"
         echo "# Do not hand-edit generation entries; run: chronos rewrite-limine"
         echo
         echo "timeout: $timeout"
@@ -788,7 +788,7 @@ cmd_rollback() {
             set_current "$id"
             rewrite_limine "$LIVE_SUBVOL" "$extras_override"
             update_init_db "$extras_override"
-            ok "rolled back to $id — reboot into Haliade system to activate"
+            ok "rolled back to $id , you can reboot ,ow"
             return 0
             ;;
     esac
@@ -809,7 +809,7 @@ cmd_rollback() {
     rewrite_limine "$NEXT_SUBVOL" "$extras_override"
     update_init_db "$extras_override"
     ok "rollback staged: next boot uses $NEXT_SUBVOL (from $id)"
-    info "reboot now. After boot, run: chronos create \"after rollback\"  # adopts @.next -> @"
+    info "You can reboot now."
 }
 
 cmd_remove() {
@@ -845,7 +845,7 @@ cmd_remove() {
 
 cmd_help() {
     cat <<EOF
-chronos — btrfs generation manager for Haliade system
+chronos : btrfs generation manager for the Haliade system
 
 Usage: chronos <command> [args]
 
