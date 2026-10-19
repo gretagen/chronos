@@ -1,5 +1,5 @@
 #!/bin/bash
-# chronos — btrfs generation manager for Haliade OS (Limine boot entries)
+# chronos — btrfs generation manager for Haliade system (Limine boot entries)
 set -euo pipefail
 
 # Only operations that change generations or the boot configuration need
@@ -174,7 +174,7 @@ generation_kernel() {
     echo "vmlinuz-$ver"
 }
 
-# Kernel for the default /Haliade OS entry: the newest kernel that the
+# Kernel for the default /Haliade SYS entry: the newest kernel that the
 # entry's target subvolume actually has modules for. After a kernel upgrade
 # that is the new kernel (live @ was just upgraded), but when a rollback is
 # staged it is the rolled-back kernel (@.next) — so a rollback never boots a
@@ -499,7 +499,7 @@ rewrite_limine() {
     local tmp name num
     tmp=$(mktemp)
     {
-        echo "# Limine configuration for Haliade OS — managed by chronos"
+        echo "# Limine configuration for this Haliade system,  managed by chronos"
         echo "# Do not hand-edit generation entries; run: chronos rewrite-limine"
         echo
         echo "timeout: $timeout"
@@ -509,7 +509,7 @@ rewrite_limine() {
             echo "wallpaper_style: stretched"
         fi
         echo
-        echo "/Haliade OS"
+        echo "/Haliade SYS"
         echo "    protocol: linux"
         echo "    kernel_path: boot():/${live_kernel}"
         echo "    module_path: boot():/${live_initrd}"
@@ -586,7 +586,7 @@ cmd_create() {
     case "$source_subvol" in
         "$LIVE_SUBVOL"|@|"$NEXT_SUBVOL"|@.next) ;;
         "$SNAPS_SUBVOL"/*|@snapshots/*)
-            die "refusing to snapshot a read-only generation boot; boot into Haliade OS first"
+            die "refusing to snapshot a read-only generation boot; boot into Haliade system first"
             ;;
         "") source_subvol="$LIVE_SUBVOL" ;;
     esac
@@ -594,7 +594,7 @@ cmd_create() {
     info "creating generation $id from $source_subvol ($desc)..."
 
     # Capture the full current cmdline from limine.conf (first cmdline line =
-    # the default /Haliade OS entry). Strip the entry indentation AND any
+    # the default /Haliade SYS entry). Strip the entry indentation AND any
     # stray "cmdline:" key prefix: the line looks like "    cmdline: root=...",
     # and a capture that keeps the indent poisons every rewrite afterwards.
     local cur_cmdline
@@ -731,7 +731,7 @@ cmd_cleanup_next() {
     booted=$(current_subvol)
     case "$booted" in
         "$NEXT_SUBVOL"|@.next)
-            die "still booted from $NEXT_SUBVOL; boot into Haliade OS (@) first"
+            die "still booted from $NEXT_SUBVOL; boot into Haliade system (@) first"
             ;;
     esac
     tl=$(mount_toplevel)
@@ -788,7 +788,7 @@ cmd_rollback() {
             set_current "$id"
             rewrite_limine "$LIVE_SUBVOL" "$extras_override"
             update_init_db "$extras_override"
-            ok "rolled back to $id — reboot into Haliade OS to activate"
+            ok "rolled back to $id — reboot into Haliade system to activate"
             return 0
             ;;
     esac
@@ -845,7 +845,7 @@ cmd_remove() {
 
 cmd_help() {
     cat <<EOF
-chronos — btrfs generation manager for Haliade OS
+chronos — btrfs generation manager for Haliade system
 
 Usage: chronos <command> [args]
 
@@ -868,8 +868,8 @@ Layout:
   @snapshots/gen-N     read-only generations
 
 Limine menu:
-  /Haliade OS                              boots live (@ or @.next)
-  /Generations//Haliade OS (Generation N)  boots @snapshots/gen-N
+  /Haliade SYS                              boots live (@ or @.next)
+  /Generations//Haliade SYS (Generation N)  boots @snapshots/gen-N
 
 Kernels:
   Each entry boots the kernel its subvolume has modules for. Generations
