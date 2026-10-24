@@ -1,4 +1,4 @@
- #!/bin/bash
+#!/bin/bash
 # chronos | btrfs generation manager for the Haliade system (Limine boot entries)
 set -euo pipefail
 
@@ -160,7 +160,7 @@ modules_kernel() {
 
 # Kernel a generation boots with. A generation snapshot is read-only, so the
 # newest module dir inside it is the kernel that generation ran when it was
-# captured — and the only one it can boot with drivers. Newer generations
+# captured, and the only one it can boot with drivers. Newer generations
 # record it in meta.toml at create time; legacy ones fall back to the scan
 # above. Returns the vmlinuz basename, or nothing.
 generation_kernel() {
@@ -174,10 +174,10 @@ generation_kernel() {
     echo "vmlinuz-$ver"
 }
 
-# Kernel for the default /Haliade SYS entry: the newest kernel that the
+# Kernel for the default /HaliadeSYS entry: the newest kernel that the
 # entry's target subvolume actually has modules for. After a kernel upgrade
 # that is the new kernel (live @ was just upgraded), but when a rollback is
-# staged it is the rolled-back kernel (@.next) — so a rollback never boots a
+# staged it is the rolled-back kernel (@.next), so a rollback never boots a
 # kernel whose modules are missing from the subvolume it boots. Falls back
 # to the newest kernel in /boot.
 default_kernel() {
@@ -210,7 +210,7 @@ ensure_layout() {
     if [ ! -d "$tl/$LIVE_SUBVOL" ] && [ ! -d "$tl/$NEXT_SUBVOL" ]; then
         umount "$tl" 2>/dev/null || true
         rmdir "$tl" 2>/dev/null || true
-        die "missing subvolume '$LIVE_SUBVOL' — reinstall with current zstrappa or create layout manually"
+        die "missing subvolume '$LIVE_SUBVOL'; reinstall with current zstrappa or create layout manually"
     fi
     if [ ! -d "$tl/$SNAPS_SUBVOL" ]; then
         info "creating $SNAPS_SUBVOL subvolume..."
@@ -344,7 +344,7 @@ extras_from() {
     for tok in $line; do
         case "$tok" in
             root=*|rootflags=*|rw|ro) ;;
-            # stray duplicated key from a bad capture — never an extra
+            # stray duplicated key from a bad capture, never an extra
             cmdline:*) ;;
             *) extras="${extras:+$extras }$tok" ;;
         esac
@@ -361,7 +361,7 @@ cmdline_extras() {
     extras_from "$line"
 }
 
-# extras with any init= token removed used for legacy generations that
+# extras with any init= token removed; used for legacy generations that
 # have no recorded cmdline: they must boot the default init, not whichever
 # one happens to be active now.
 strip_init() {
@@ -395,7 +395,7 @@ init_name_of() {
 # Align /var/db/init with the init a rollback will boot (same ordering as
 # iniswap's record_init_state: current <- new, previous <- old current), so
 # the universal shutdown/reboot wrappers pick the right tool right after
-# the rollback boot — without waiting for the next declaration sync.
+# the rollback boot, without waiting for the next declaration sync.
 update_init_db() {
     local new_init old=""
     new_init=$(init_name_of "$1")
@@ -461,7 +461,7 @@ rewrite_limine() {
     # Pin the DEFAULT entry to the kernel the booted subvolume has modules
     # for. That is normally the newest kernel (live @ is upgraded by
     # genkernel), but after a staged rollback it is the rolled-back kernel
-    # (@.next) — otherwise the rollback would boot a kernel whose modules
+    # (@.next); otherwise the rollback would boot a kernel whose modules
     # are not in that subvolume: no drivers, no network.
     local live_kernel live_initrd live_ver
     live_kernel=$(default_kernel "$live_subvol") || true
@@ -540,7 +540,7 @@ rewrite_limine() {
                 # Pin this generation to the kernel ITS snapshot has modules
                 # for. Rewriting every entry with the newest kernel would make
                 # a rollback boot a kernel whose module dir is not in the
-                # generation — no drivers, no network.
+                # generation: no drivers, no network.
                 local gen_kernel gen_initrd gen_ver
                 gen_kernel=$(generation_kernel "$name") || true
                 if [ -n "$gen_kernel" ]; then
@@ -554,7 +554,7 @@ rewrite_limine() {
 
                 desc=$(load_meta_desc "$name")
                 desc=${desc:-"(no description)"}
-                echo "    //Generation ${num} — ${desc}"
+                echo "    //Generation ${num} | ${desc}"
                 echo "        protocol: linux"
                 echo "        kernel_path: boot():/${gen_kernel}"
                 echo "        module_path: boot():/${gen_initrd}"
@@ -595,7 +595,7 @@ cmd_create() {
     info "creating generation $id from $source_subvol ($desc)..."
 
     # Capture the full current cmdline from limine.conf (first cmdline line =
-    # the default /Haliade SYS entry). Strip the entry indentation AND any
+    # the default /HaliadeSYS entry). Strip the entry indentation AND any
     # stray "cmdline:" key prefix: the line looks like "    cmdline: root=...",
     # and a capture that keeps the indent poisons every rewrite afterwards.
     local cur_cmdline
@@ -723,7 +723,7 @@ cmd_adopt_if_needed() {
 
     # Still running on @.next until reboot; point default boot back at @
     rewrite_limine "$LIVE_SUBVOL"
-    ok "promoted rollback to $LIVE_SUBVOL — reboot once more to drop $NEXT_SUBVOL"
+    ok "promoted rollback to $LIVE_SUBVOL; reboot once more to drop $NEXT_SUBVOL"
     info "after reboot you may run: chronos cleanup-next"
 }
 
@@ -771,7 +771,7 @@ cmd_rollback() {
     local booted tl
     booted=$(current_subvol)
 
-    # Recovery path: booted from a generation — can replace @ directly
+    # Recovery path: booted from a generation; can replace @ directly
     case "$booted" in
         "$SNAPS_SUBVOL"/*|@snapshots/*)
             info "booted from snapshot; replacing live $LIVE_SUBVOL with $id..."
@@ -794,7 +794,7 @@ cmd_rollback() {
             ;;
     esac
 
-    # Live path: cannot delete mounted @ — stage @.next and switch default boot
+    # Live path: cannot delete mounted @; stage @.next and switch default boot
     info "staging rollback of $id as $NEXT_SUBVOL (live $LIVE_SUBVOL is mounted)..."
     tl=$(mount_toplevel)
 
