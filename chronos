@@ -1,5 +1,5 @@
-#!/bin/bash
-# chronos — btrfs generation manager for Haliade system (Limine boot entries)
+ #!/bin/bash
+# chronos | btrfs generation manager for the Haliade system (Limine boot entries)
 set -euo pipefail
 
 # Only operations that change generations or the boot configuration need
@@ -361,7 +361,7 @@ cmdline_extras() {
     extras_from "$line"
 }
 
-# extras with any init= token removed — used for legacy generations that
+# extras with any init= token removed used for legacy generations that
 # have no recorded cmdline: they must boot the default init, not whichever
 # one happens to be active now.
 strip_init() {
@@ -386,6 +386,7 @@ init_name_of() {
         */dinit)             echo "dinit" ;;
         */openrc-init)       echo "openrc" ;;
         */systemd)            echo "systemd" ;;
+        */shepherd)            echo "shepherd" ;;
         "")                  echo "openrc" ;;
         *)                   echo "unknown" ;;
     esac
@@ -509,7 +510,7 @@ rewrite_limine() {
             echo "wallpaper_style: stretched"
         fi
         echo
-        echo "/Haliade SYS"
+        echo "/HaliadeSYS"
         echo "    protocol: linux"
         echo "    kernel_path: boot():/${live_kernel}"
         echo "    module_path: boot():/${live_initrd}"
@@ -546,7 +547,7 @@ rewrite_limine() {
                     gen_ver="${gen_kernel#vmlinuz-}"
                     gen_initrd=$(find_initrd "$gen_ver") || gen_initrd="$initrd"
                 else
-                    warn "generation $name: no kernel with modules found — using newest kernel ($kernel)"
+                    warn "generation $name: no kernel with modules found, using kernel ($kernel)"
                     gen_kernel="$kernel"
                     gen_initrd="$initrd"
                 fi
@@ -827,7 +828,7 @@ cmd_remove() {
     fi
     case "$booted" in
         */"$id"|"$SNAPS_SUBVOL/$id")
-            die "cannot remove currently-booted generation $id"
+            die "cannot remove current generation because it is booted. $id"
             ;;
     esac
 
@@ -868,8 +869,8 @@ Layout:
   @snapshots/gen-N     read-only generations
 
 Limine menu:
-  /Haliade SYS                              boots live (@ or @.next)
-  /Generations//Haliade SYS (Generation N)  boots @snapshots/gen-N
+  /HaliadeSYS                               boots live (@ or @.next)
+  /Generations//HaliadeSYS (Generation N)  boots @snapshots/gen-N
 
 Kernels:
   Each entry boots the kernel its subvolume has modules for. Generations
