@@ -150,12 +150,24 @@ find_initrd() {
     return 1
 }
 
-# Newest kernel version with modules at the given root path, or "". Kernel
-# versions are the directories in lib/modules (e.g. 6.18.10-gen); anything
-# not starting with a digit (build/, source/, extramodules-*) is not a
-# kernel we can boot.
-modules_kernel() {
-    ls -1 "$1/lib/modules/" 2>/dev/null | sed -n '/^[0-9]/p' | sort -V | tail -1 || true
+# Newest BOOTABLE kernel version with modules at the given root path, or "".
+# Kernel versions are the directories in lib/modules (e.g. 6.18.10-gen);
+# anything not starting with a digit (build/, source/, extramodules-*) is not
+# a kernel we can boot. A module dir only counts when /boot actually has the
+# matching vmlinuz: plain sort -V ranks "7.3.0-rc7-gen" ABOVE "7.3.0-gen"
+# (letters sort before digits in version order), and a leftover rc module dir
+# without its kernel image used to win — every create then screamed "no kernel
+# with modules found" and entries fell back to guesswork.
+bootable_modules_kernel() {
+    local d
+    [ -d "$1/lib/modules" ] || return 1
+    for d in $(ls -1 "$1/lib/modules/" | sed -n '/^[0-9]/p' | sort -Vr); do
+        if [ -f "/boot/vmlinuz-$d" ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Kernel a generation boots with. A generation snapshot is read-only, so the
@@ -166,15 +178,18 @@ modules_kernel() {
 generation_kernel() {
     local gen="$1" ver
     ver=$(load_meta_kernel "$gen")
-    if [ -z "$ver" ]; then
-        ver=$(modules_kernel "$SNAP_MOUNT/$gen")
+    # A recorded kernel may be unusable: metas used to record the newest
+    # module dir even when /boot had no vmlinuz for it (7.3.0-rc7-gen), which
+    # made every rewrite warn and guess. Validate, then fall back to the
+    # newest bootable module dir inside the snapshot itself.
+    if [ -z "$ver" ] || [ ! -f "/boot/vmlinuz-$ver" ]; then
+        ver=$(bootable_modules_kernel "$SNAP_MOUNT/$gen")
     fi
     [ -n "$ver" ] || return 1
-    [ -f "/boot/vmlinuz-$ver" ] || return 1
     echo "vmlinuz-$ver"
 }
 
-# Kernel for the default /HaliadeSYS entry: the newest kernel that the
+# Kernel for the default /HaliadeSYS entry: the newest bootable kernel that the
 # entry's target subvolume actually has modules for. After a kernel upgrade
 # that is the new kernel (live @ was just upgraded), but when a rollback is
 # staged it is the rolled-back kernel (@.next), so a rollback never boots a
@@ -184,11 +199,11 @@ default_kernel() {
     local subvol="$1" tl ver=""
     tl=$(mount_toplevel 2>/dev/null) || true
     if [ -n "$tl" ]; then
-        ver=$(modules_kernel "$tl/$subvol")
+        ver=$(bootable_modules_kernel "$tl/$subvol")
         umount "$tl" 2>/dev/null || true
         rmdir "$tl" 2>/dev/null || true
     fi
-    [ -n "$ver" ] && [ -f "/boot/vmlinuz-$ver" ] && { echo "vmlinuz-$ver"; return 0; }
+    [ -n "$ver" ] && { echo "vmlinuz-$ver"; return 0; }
     find_kernel || true
 }
 
@@ -384,6 +399,7 @@ init_name_of() {
     case "$p" in
         */runit-init|*/runit) echo "runit" ;;
         */dinit)             echo "dinit" ;;
+        */shepherd)          echo "shepherd" ;;
         */openrc-init)       echo "openrc" ;;
         */systemd)            echo "systemd" ;;
         */shepherd)            echo "shepherd" ;;
@@ -531,11 +547,24 @@ rewrite_limine() {
             echo "/Generations"
             for name in "${gens[@]}"; do
                 num=${name#gen-}
+                local desc gen_extras
+
+                # Always rebuild root/rootflags for the entry: the recorded
+                # cmdline was captured from the MAIN entry and carries
+                # rootflags=subvol=@ (or @.next) — emitting it verbatim made
+                # every generation boot the live root instead of its own
+                # snapshot. extras_from keeps the recorded extras (init=,
+                # kernel params). Legacy gens without a recorded cmdline fall
+                # back to extras_no_init: no init=, so they boot the default
+                # init instead of whichever one is active now.
                 gen_cmd=$(gen_cmdline "$name")
-                # Fallback for legacy gens without stored cmdline: no init=,
-                # so they boot the default init (never the currently-active one)
-                [ -z "$gen_cmd" ] && gen_cmd="root=${rspec} rootflags=subvol=${SNAPS_SUBVOL}/${name} rw${extras_no_init:+ $extras_no_init}"
-                local desc
+                if [ -n "$gen_cmd" ]; then
+                    gen_extras=$(extras_from "$gen_cmd")
+                else
+                    gen_extras="$extras_no_init"
+                fi
+                gen_cmd="root=${rspec} rootflags=subvol=${SNAPS_SUBVOL}/${name} rw"
+                [ -n "$gen_extras" ] && gen_cmd="$gen_cmd $gen_extras"
 
                 # Pin this generation to the kernel ITS snapshot has modules
                 # for. Rewriting every entry with the newest kernel would make
@@ -617,10 +646,12 @@ cmd_create() {
     rmdir "$tl" 2>/dev/null || true
 
     # RO snapshot: store metadata beside the snap. Record the kernel the
-    # snapshot boots with (its newest module dir) so limine.conf rewrites
-    # pin this generation to its own kernel rather than the newest one.
+    # snapshot boots with (its newest BOOTABLE module dir) so limine.conf
+    # rewrites pin this generation to its own kernel rather than the newest
+    # one — a non-bootable version (an rc dir without a vmlinuz) must never
+    # end up in the meta.
     local kernel_ver
-    kernel_ver=$(modules_kernel /) || true
+    kernel_ver=$(bootable_modules_kernel /) || true
     write_meta_file "$SNAP_MOUNT/${id}.meta.toml" "$id" "$desc" "$cur_cmdline" "$kernel_ver"
 
     set_current "$id"
@@ -697,6 +728,11 @@ cmd_current() {
 }
 
 # If booted from @.next after a deferred rollback, promote it to @.
+# Every btrfs step here is verified. The old code swallowed the delete error
+# (2>/dev/null || true) and then rewrote the default boot to @ ANYWAY, which
+# pointed the next boot at a stale @ that had missed every recent update —
+# no dbus, no iwd, no compositor. On any failure we now die BEFORE touching
+# the boot entries, so the default stays on @.next (a bootable, current root).
 cmd_adopt_if_needed() {
     local booted tl
     booted=$(current_subvol)
@@ -707,16 +743,39 @@ cmd_adopt_if_needed() {
 
     info "adopting $NEXT_SUBVOL as $LIVE_SUBVOL..."
     tl=$(mount_toplevel)
-    # Old @ is unused (we're on @.next)
+    # Old @ is unused (we're on @.next). Keep a copy-on-write backup first so
+    # nothing is lost even if no generation captured this state.
     if [ -d "$tl/$LIVE_SUBVOL" ]; then
-        btrfs subvolume delete "$tl/$LIVE_SUBVOL" 2>/dev/null \
-            || btrfs subvolume snapshot -r "$tl/$LIVE_SUBVOL" "$tl/@.old-$(date +%s)" 2>/dev/null || true
-        btrfs subvolume delete "$tl/$LIVE_SUBVOL" 2>/dev/null || true
+        local ts bak nested n
+        ts=$(date +%s)
+        bak="$tl/@.old-$ts"
+        if ! btrfs subvolume snapshot -r "$tl/$LIVE_SUBVOL" "$bak"; then
+            warn "could not back up old $LIVE_SUBVOL — continuing; keep $NEXT_SUBVOL until the promotion is verified"
+        fi
+        # Nested subvolumes inside @ (var/lib/machines, var/lib/portables, ...)
+        # make its deletion fail with "Directory not empty" — the reason the
+        # old adopt silently never replaced @ and kept pointing the default
+        # boot at a stale root. Move each nested subvolume aside next to the
+        # backup first so nothing is lost either.
+        nested=$(btrfs subvolume list "$tl" 2>/dev/null | sed -n "s|^.* path $LIVE_SUBVOL/||p")
+        for n in $nested; do
+            info "moving nested subvolume $LIVE_SUBVOL/$n out to $bak-$(printf '%s' "$n" | tr / _)..."
+            btrfs subvolume snapshot -r "$tl/$LIVE_SUBVOL/$n" "$bak-$(printf '%s' "$n" | tr / _)" \
+                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to back up nested subvolume @$n — default boot stays on $NEXT_SUBVOL"; }
+            btrfs subvolume delete "$tl/$LIVE_SUBVOL/$n" \
+                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to remove nested subvolume @$n (it blocks replacing $LIVE_SUBVOL) — default boot stays on $NEXT_SUBVOL"; }
+        done
+        if ! btrfs subvolume delete "$tl/$LIVE_SUBVOL"; then
+            umount "$tl" 2>/dev/null || true
+            rmdir "$tl" 2>/dev/null || true
+            die "cannot replace $LIVE_SUBVOL — default boot stays on $NEXT_SUBVOL; fix the btrfs error above and rerun"
+        fi
     fi
     # btrfs cannot rename subvolumes; snapshot @.next -> @ then delete @.next later
-    if [ ! -d "$tl/$LIVE_SUBVOL" ]; then
-        btrfs subvolume snapshot "$tl/$NEXT_SUBVOL" "$tl/$LIVE_SUBVOL" \
-            || { umount "$tl"; rmdir "$tl"; die "failed to promote $NEXT_SUBVOL to $LIVE_SUBVOL"; }
+    if ! btrfs subvolume snapshot "$tl/$NEXT_SUBVOL" "$tl/$LIVE_SUBVOL"; then
+        umount "$tl" 2>/dev/null || true
+        rmdir "$tl" 2>/dev/null || true
+        die "failed to promote $NEXT_SUBVOL to $LIVE_SUBVOL — default boot stays on $NEXT_SUBVOL"
     fi
     umount "$tl"
     rmdir "$tl" 2>/dev/null || true
@@ -901,7 +960,9 @@ case "${1:-help}" in
         cmd_remove "${1:-}"
         ;;
     rewrite-limine|rewrite_limine)
-        cmd_adopt_if_needed 2>/dev/null || true
+        # Never swallow an adopt failure: rewriting on top of a failed adopt
+        # is what used to point the default boot at a stale @.
+        cmd_adopt_if_needed
         ensure_snapshots_mounted
         rewrite_limine
         ;;
