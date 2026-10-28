@@ -576,7 +576,7 @@ rewrite_limine() {
                     gen_ver="${gen_kernel#vmlinuz-}"
                     gen_initrd=$(find_initrd "$gen_ver") || gen_initrd="$initrd"
                 else
-                    warn "generation $name: no kernel with modules found, using kernel ($kernel)"
+                    warn "generation $name: no kernel with modules found; using newest kernel ($kernel)"
                     gen_kernel="$kernel"
                     gen_initrd="$initrd"
                 fi
@@ -616,7 +616,7 @@ cmd_create() {
     case "$source_subvol" in
         "$LIVE_SUBVOL"|@|"$NEXT_SUBVOL"|@.next) ;;
         "$SNAPS_SUBVOL"/*|@snapshots/*)
-            die "refusing to snapshot a read-only generation boot; boot into Haliade system first"
+            die "refusing to snapshot a read-only generation boot; boot into the Haliade system first"
             ;;
         "") source_subvol="$LIVE_SUBVOL" ;;
     esac
@@ -791,7 +791,7 @@ cmd_cleanup_next() {
     booted=$(current_subvol)
     case "$booted" in
         "$NEXT_SUBVOL"|@.next)
-            die "still booted from $NEXT_SUBVOL; boot into Haliade system (@) first"
+            die "still booted from $NEXT_SUBVOL; boot into the Haliade system (@) first"
             ;;
     esac
     tl=$(mount_toplevel)
@@ -872,9 +872,63 @@ cmd_rollback() {
     info "You can reboot now."
 }
 
+# Remove every generation in one command. The main /HaliadeSYS entry is
+# untouched: rewrite_limine only emits the /Generations block when at least
+# one gen-* dir exists, so a full removal leaves a menu with just the live
+# entry. One toplevel mount for the whole batch instead of one per
+# generation. On a failure we unmount, rewrite (so the menu matches what is
+# actually left on disk) and then die, keeping the remaining generations.
+cmd_remove_all() {
+    ensure_snapshots_mounted
+
+    # Never delete the snapshot we are running from
+    local booted
+    booted=$(current_subvol)
+    case "$booted" in
+        "$SNAPS_SUBVOL"/*|@snapshots/*)
+            die "cannot remove generations while booted from $booted; boot into the Haliade system first"
+            ;;
+    esac
+
+    local names=() d
+    for d in "$SNAP_MOUNT"/gen-*; do
+        [ -d "$d" ] || continue
+        names+=("$(basename "$d")")
+    done
+    [ ${#names[@]} -gt 0 ] || { info "no generations to remove"; return 0; }
+
+    info "removing ${#names[@]} generation(s)..."
+
+    local tl name removed=0
+    tl=$(mount_toplevel)
+    for name in "${names[@]}"; do
+        if ! btrfs subvolume delete "$tl/$SNAPS_SUBVOL/$name"; then
+            umount "$tl" 2>/dev/null || true
+            rmdir "$tl" 2>/dev/null || true
+            rewrite_limine || true
+            die "failed to delete $name; removed $removed of ${#names[@]}, remaining generations kept"
+        fi
+        # only after the delete succeeded, so a failed one stays listed
+        rm -f "$SNAP_MOUNT/${name}.meta.toml"
+        removed=$((removed + 1))
+    done
+    umount "$tl"
+    rmdir "$tl" 2>/dev/null || true
+
+    # no dangling id left for list/current to point at
+    rm -f "$SNAP_MOUNT/.current"
+    rewrite_limine
+    ok "removed $removed generation(s)"
+}
+
 cmd_remove() {
     local raw="${1:-}"
-    [ -n "$raw" ] || die "missing generation id (usage: chronos remove <N>)"
+    [ -n "$raw" ] || die "missing generation id (usage: chronos remove <N>|all)"
+
+    if [ "$raw" = "all" ]; then
+        cmd_remove_all
+        return 0
+    fi
 
     ensure_snapshots_mounted
     local id current booted
@@ -914,7 +968,7 @@ Commands:
   list                   List generations (* = last created/current)
   current                Show current generation and booted subvolume
   rollback <N>           Roll back to generation N (reboot required)
-  remove <N>             Delete a generation
+  remove <N>|all         Delete one, or every, generation
   rewrite-limine         Regenerate /boot/limine.conf
   cleanup-next           Delete staged @.next after a completed rollback
   help                   Show this help
