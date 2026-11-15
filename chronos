@@ -28,8 +28,8 @@ INIT_DB="${CHRONOS_INIT_DB:-/var/db/init}"
 # Helpers
 
 die() { echo "error: $*" >&2; exit 1; }
-info() { echo "[info] $*"; }
-ok() { echo "[ok] $*"; }
+info() { echo "$*"; }
+ok() { echo "$*"; }
 warn() { echo "warning: $*" >&2; }
 
 root_device() {
@@ -156,7 +156,7 @@ find_initrd() {
 # a kernel we can boot. A module dir only counts when /boot actually has the
 # matching vmlinuz: plain sort -V ranks "7.3.0-rc7-gen" ABOVE "7.3.0-gen"
 # (letters sort before digits in version order), and a leftover rc module dir
-# without its kernel image used to win — every create then screamed "no kernel
+# without its kernel image used to win: every create then screamed "no kernel
 # with modules found" and entries fell back to guesswork.
 bootable_modules_kernel() {
     local d
@@ -402,7 +402,6 @@ init_name_of() {
         */shepherd)          echo "shepherd" ;;
         */openrc-init)       echo "openrc" ;;
         */systemd)            echo "systemd" ;;
-        */shepherd)            echo "shepherd" ;;
         "")                  echo "openrc" ;;
         *)                   echo "unknown" ;;
     esac
@@ -516,8 +515,8 @@ rewrite_limine() {
     local tmp name num
     tmp=$(mktemp)
     {
-        echo "# Limine configuration for this Haliade system, managed by chronos"
-        echo "# Do not hand-edit generation entries; run: chronos rewrite-limine"
+        echo "# Limine configuration for Haliade, managed by chronos"
+        echo "# Do not hand-edit generation entries; let chronos rewrite it."
         echo
         echo "timeout: $timeout"
         echo "serial: $serial"
@@ -551,7 +550,7 @@ rewrite_limine() {
 
                 # Always rebuild root/rootflags for the entry: the recorded
                 # cmdline was captured from the MAIN entry and carries
-                # rootflags=subvol=@ (or @.next) — emitting it verbatim made
+                # rootflags=subvol=@ (or @.next): emitting it verbatim made
                 # every generation boot the live root instead of its own
                 # snapshot. extras_from keeps the recorded extras (init=,
                 # kernel params). Legacy gens without a recorded cmdline fall
@@ -648,7 +647,7 @@ cmd_create() {
     # RO snapshot: store metadata beside the snap. Record the kernel the
     # snapshot boots with (its newest BOOTABLE module dir) so limine.conf
     # rewrites pin this generation to its own kernel rather than the newest
-    # one — a non-bootable version (an rc dir without a vmlinuz) must never
+    # one: a non-bootable version (an rc dir without a vmlinuz) must never
     # end up in the meta.
     local kernel_ver
     kernel_ver=$(bootable_modules_kernel /) || true
@@ -730,7 +729,7 @@ cmd_current() {
 # If booted from @.next after a deferred rollback, promote it to @.
 # Every btrfs step here is verified. The old code swallowed the delete error
 # (2>/dev/null || true) and then rewrote the default boot to @ ANYWAY, which
-# pointed the next boot at a stale @ that had missed every recent update —
+# pointed the next boot at a stale @ that had missed every recent update:
 # no dbus, no iwd, no compositor. On any failure we now die BEFORE touching
 # the boot entries, so the default stays on @.next (a bootable, current root).
 cmd_adopt_if_needed() {
@@ -750,10 +749,10 @@ cmd_adopt_if_needed() {
         ts=$(date +%s)
         bak="$tl/@.old-$ts"
         if ! btrfs subvolume snapshot -r "$tl/$LIVE_SUBVOL" "$bak"; then
-            warn "could not back up old $LIVE_SUBVOL — continuing; keep $NEXT_SUBVOL until the promotion is verified"
+            warn "could not back up old $LIVE_SUBVOL, continuing; keep $NEXT_SUBVOL until the promotion is verified"
         fi
         # Nested subvolumes inside @ (var/lib/machines, var/lib/portables, ...)
-        # make its deletion fail with "Directory not empty" — the reason the
+        # make its deletion fail with "Directory not empty": the reason the
         # old adopt silently never replaced @ and kept pointing the default
         # boot at a stale root. Move each nested subvolume aside next to the
         # backup first so nothing is lost either.
@@ -761,21 +760,21 @@ cmd_adopt_if_needed() {
         for n in $nested; do
             info "moving nested subvolume $LIVE_SUBVOL/$n out to $bak-$(printf '%s' "$n" | tr / _)..."
             btrfs subvolume snapshot -r "$tl/$LIVE_SUBVOL/$n" "$bak-$(printf '%s' "$n" | tr / _)" \
-                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to back up nested subvolume @$n — default boot stays on $NEXT_SUBVOL"; }
+                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to back up nested subvolume @$n: default boot stays on $NEXT_SUBVOL"; }
             btrfs subvolume delete "$tl/$LIVE_SUBVOL/$n" \
-                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to remove nested subvolume @$n (it blocks replacing $LIVE_SUBVOL) — default boot stays on $NEXT_SUBVOL"; }
+                || { umount "$tl" 2>/dev/null || true; rmdir "$tl" 2>/dev/null || true; die "failed to remove nested subvolume @$n (it blocks replacing $LIVE_SUBVOL): default boot stays on $NEXT_SUBVOL"; }
         done
         if ! btrfs subvolume delete "$tl/$LIVE_SUBVOL"; then
             umount "$tl" 2>/dev/null || true
             rmdir "$tl" 2>/dev/null || true
-            die "cannot replace $LIVE_SUBVOL — default boot stays on $NEXT_SUBVOL; fix the btrfs error above and rerun"
+            die "cannot replace $LIVE_SUBVOL: default boot stays on $NEXT_SUBVOL; fix the btrfs error above and rerun"
         fi
     fi
     # btrfs cannot rename subvolumes; snapshot @.next -> @ then delete @.next later
     if ! btrfs subvolume snapshot "$tl/$NEXT_SUBVOL" "$tl/$LIVE_SUBVOL"; then
         umount "$tl" 2>/dev/null || true
         rmdir "$tl" 2>/dev/null || true
-        die "failed to promote $NEXT_SUBVOL to $LIVE_SUBVOL — default boot stays on $NEXT_SUBVOL"
+        die "failed to promote $NEXT_SUBVOL to $LIVE_SUBVOL: default boot stays on $NEXT_SUBVOL"
     fi
     umount "$tl"
     rmdir "$tl" 2>/dev/null || true
@@ -848,7 +847,7 @@ cmd_rollback() {
             set_current "$id"
             rewrite_limine "$LIVE_SUBVOL" "$extras_override"
             update_init_db "$extras_override"
-            ok "rolled back to $id , you can reboot ,ow"
+            ok "rolled back to $id, you can reboot now"
             return 0
             ;;
     esac
@@ -959,7 +958,26 @@ cmd_remove() {
 
 cmd_help() {
     cat <<EOF
-chronos : btrfs generation manager for the Haliade system
+               ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣠⣤⣤⣤⣤⣤⣤⣄⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀
+               ⠀⠀⠀⠀⠀⠀⠀⠀⠀⣀⣴⣾⣿⡿⠿⠟⠛⠛⠛⠛⠻⠿⢿⣿⣷⣦⣄⠀⠀⠀⠀⠀⠀⠀
+               ⠀⠀⠀⠀⠀⠀⢀⣤⣾⡿⠟⣋⣁⡀⠀⠈⢹⠈⢋⣿⠀⠀⠀⣈⡙⠻⢿⣷⣦⡀⠀⠀⠀⠀
+               ⠀⠀⠀⠀⠀⣠⣾⡿⠋⠀⠀⢸⡇⣇⠀⠀⠘⠐⠛⠓⠂⠀⠀⢸⡇⠀⠀⠙⢿⣿⣆⠀⠀⠀
+               ⠀⠀⠀⠀⣼⣿⡟⠁⠀⠀⠀⠈⠁⠉⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠁⠀⠀⠀⠈⢻⣿⣧⠀⠀
+               ⠀⠀⢀⣼⣿⠏⠈⣿⣼⠉⣧⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢉⣽⠀⠹⣿⣧⠀
+               ⠀⠀⣼⣿⡟⠀⠀⠛⠘⠓⠋⣷⣶⣶⡀⠀⠀⢠⡄⠀⠀⠀⢀⣾⣿⣿⠃⠛⠓⠂⠀⢻⣿⡆
+               ⠀⣼⣿⣿⡇⢀⣀⡀⠀⠀⠀⠸⠟⠻⢿⣶⣄⣸⣇⣀⣤⡶⠟⠋⠟⠃⠀⠀⢀⠀⢀⠸⣿⣧
+               ⢰⣿⣿⣿⠀⠿⢼⣷⠀⠀⠀⠀⠀⠀⠉⠛⣿⣿⣿⣿⠉⠀⠀⠀⠀⠀⠀⠀⠀⠮⡮⠀⣿⣿
+               ⢾⣿⣿⣿⡆⠛⠛⠁⠀⠀⠀⠀⠀⠀⠀⠀⠪⢻⡟⠁⠀⠀⠀⠀⠀⠀⠀⠀⠘⠛⠋⢰⣿⡟
+               ⢿⣿⣿⣿⣧⠀⠀⣀⣀⠀⠀⠀⠀⠀⠀⠀⠀⠘⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⡀⠀⠀⣸⣿⡇
+               ⢸⣿⣿⣿⣿⣆⠀⡿⢼⡅⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⢀⣞⣥⡀⣰⣿⡿⠀
+               ⠈⣿⣿⣿⣿⣿⣦⠉⠉⠁⠀⠀⠀⠀⠀⠀⠀⠀⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⣴⣿⡿⠁⠀
+               ⠀⠸⣿⣿⣿⣿⣿⣷⣄⠀⠀⠛⣹⠃⠀⠀⠀⣠⣧⡀⠀⠀⠀⠯⣍⠀⠀⣠⣾⣿⠟⠀⠀⠀
+               ⠀⠀⠹⣿⣿⣿⣿⣿⣿⣷⣤⣀⠋⠀⠀⠀⢸⣾⣷⡆⠀⠀⠈⠓⢋⣤⣾⣿⠟⠁⠀⠀⠀⠀
+               ⠀⠀⠀⠈⠻⣿⣿⣿⣿⣿⣿⣿⣿⣶⣦⣴⣶⣿⣿⣶⣶⣤⣶⣿⣿⡿⠋⠁⠀⠀⠀⠀⠀⠀
+               ⠀⠀⠀⠀⠀⠀⠙⢿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⡿⠛⠋⠀⠀⠀⠀⠀⠀⠀⠀⠀
+               ⠀⠀⠀⠀⠀⠀⠀⠀⠀⠉⠙⠛⠿⣿⠿⠿⠿⠿⠛⠛⠋⠀⠀⠀⠀⠀⠀
+
+chronos | btrfs generation manager for the Haliade system
 
 Usage: chronos <command> [args]
 
