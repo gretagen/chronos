@@ -456,6 +456,44 @@ default_live_subvol() {
     esac
 }
 
+# Entries chronos does not own (/HaliadeSYS and /Generations): every other
+# top-level entry in the existing conf (dualboot / other OS), printed
+# verbatim so rewrite_limine can re-append them. The preamble before the
+# first entry (globals) is dropped. chronos regenerates it from the
+# harvested timeout/serial/wallpaper. Empty output when the conf is
+# missing or holds only chronos-managed entries.
+extract_foreign_entries() {
+    [ -f "$LIMINE_CONF" ] || return 0
+
+    # An entry before /HaliadeSYS would become Limine's default and poison
+    # the "first cmdline in the file" harvest (cmdline_extras,
+    # default_live_subvol, cmd_create, nacelle's boot generator), so
+    # chronos moves it below the generated blocks: warn instead of
+    # silently reordering.
+    local first
+    first=$(grep -m1 '^/[^/]' "$LIMINE_CONF" 2>/dev/null | sed 's/[[:space:]]*$//' || true)
+    if [ -n "$first" ] && [ "$first" != "/HaliadeSYS" ]; then
+        warn "entry '${first#/}' precedes /HaliadeSYS in $LIMINE_CONF; moving it below the generated entries"
+    fi
+
+    awk '
+        # print the block collected so far when a new entry header shows up
+        function flush() { if (keep) printf "%s", buf }
+        {
+            line = $0
+            sub(/[[:space:]]+$/, "", line)
+            if (line ~ /^\/[^\/]/) {   # entry header; indented //Generation
+                flush()                # comments and # lines never match
+                keep = (line != "/HaliadeSYS" && line != "/Generations")
+                buf = $0 ORS
+                next
+            }
+            if (keep) buf = buf $0 ORS
+        }
+        END { flush() }
+    ' "$LIMINE_CONF"
+}
+
 # Limine rewrite
 
 rewrite_limine() {
@@ -517,6 +555,7 @@ rewrite_limine() {
     {
         echo "# Limine configuration for Haliade, managed by chronos"
         echo "# Do not hand-edit generation entries; let chronos rewrite it."
+        echo "# Any other entry, such as another OS is preserved."
         echo
         echo "timeout: $timeout"
         echo "serial: $serial"
@@ -590,6 +629,23 @@ rewrite_limine() {
             done
         fi
     } > "$tmp"
+
+    # Re-append every entry chronos does not own (other system
+    # declared by hand), taken from the conf we are about to replace and
+    # placed after the generated blocks so /HaliadeSYS stays the first
+    # entry: Limine's default, and the cmdline source that every harvest
+    # in this script and in nacelle's boot generator relies on. The marker
+    # line lands inside the preceding owned block on the next pass, so it
+    # is dropped and re-emitted exactly once: idempotent.
+    local foreign
+    foreign=$(extract_foreign_entries)
+    if [ -n "$foreign" ]; then
+        {
+            echo
+            echo "# entries below are preserved verbatim across rewrites (for other systems)"
+            printf '%s' "$foreign"
+        } >> "$tmp"
+    fi
 
     mkdir -p "$(dirname "$LIMINE_CONF")"
     mv "$tmp" "$LIMINE_CONF"
@@ -992,7 +1048,7 @@ Commands:
   help                   Show this help
 
 Only create/rollback/remove/rewrite-limine/cleanup-next need superuser
-privileges; list, current and help can be run by any user.
+privileges; list, current and help can be ran normally.
 
 Layout:
   @                    live writable root
